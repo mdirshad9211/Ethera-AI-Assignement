@@ -5,6 +5,7 @@ import helmet from 'helmet'
 import compression from 'compression'
 import morgan from 'morgan'
 import mongoose from 'mongoose'
+
 import { env, getCorsOrigins } from './config/env.js'
 import { authRouter } from './routes/auth.routes.js'
 import { dashboardRouter } from './routes/dashboard.routes.js'
@@ -17,24 +18,65 @@ import { ensureAdminUser } from './bootstrap/ensureAdminUser.js'
 
 const isVercel = !!process.env.VERCEL
 
-if (env.TRUST_PROXY) {
-  // eslint-disable-next-line no-console
-  console.info('Trust proxy: enabled')
+const app = express()
+
+/**
+ * ✅ FIX 1: Trust proxy (REQUIRED for Vercel / proxies)
+ */
+app.set('trust proxy', 1)
+
+/**
+ * ✅ MongoDB connection cache (IMPORTANT for serverless)
+ */
+let isConnected = false
+
+async function connectDb() {
+  if (isConnected) return
+
+  try {
+    const db = await mongoose.connect(env.MONGODB_URI, {
+      maxPoolSize: 20,
+      serverSelectionTimeoutMS: 10000,
+    })
+
+    isConnected = db.connections[0].readyState === 1
+    console.info('MongoDB connected')
+  } catch (err) {
+    console.error('MongoDB connection error:', err)
+    throw err
+  }
 }
 
-const app = express()
-app.set('trust proxy', env.TRUST_PROXY ? 1 : false)
+/**
+ * ✅ FIX 2: Ensure DB connection BEFORE handling requests
+ */
+app.use(async (req, res, next) => {
+  try {
+    await connectDb()
+    next()
+  } catch (err) {
+    next(err)
+  }
+})
 
+/**
+ * Middlewares
+ */
 app.use(helmet())
 app.use(compression())
 app.use(express.json({ limit: '1mb' }))
+
 app.use(
   morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev', {
     skip: (req) => req.path === '/health',
   }),
 )
 
+/**
+ * CORS setup
+ */
 const corsOrigins = getCorsOrigins()
+
 app.use(
   cors({
     origin:
@@ -49,9 +91,13 @@ app.use(
   }),
 )
 
+/**
+ * Health check
+ */
 app.get('/health', (_req, res) => {
   const db =
     mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+
   res.json({
     status: 'ok',
     uptime: process.uptime(),
@@ -60,65 +106,49 @@ app.get('/health', (_req, res) => {
   })
 })
 
+/**
+ * Routes
+ */
 app.use('/api', apiLimiter)
 app.use('/api/auth', authRouter)
 app.use('/api/users', usersRouter)
 app.use('/api', dashboardRouter)
 app.use('/api/projects', projectsRouter)
 
+/**
+ * Error handling
+ */
 app.use(notFoundHandler)
 app.use(errorHandler)
 
-const server = http.createServer(app)
-
-async function connectDb() {
-  try {
-    if (mongoose.connection.readyState === 1) return
-    await mongoose.connect(env.MONGODB_URI, {
-      maxPoolSize: 20,
-      serverSelectionTimeoutMS: 10_000,
-    })
-  } catch (err) {
-    const refused =
-      err?.name === 'MongooseServerSelectionError' ||
-      err?.message?.includes('ECONNREFUSED')
-    if (refused) {
-      console.error(
-        '\n[x] MongoDB is not reachable at the URI in MONGODB_URI.\n' +
-          '    Start MongoDB locally (e.g. Windows: install MongoDB Community + run mongod),\n' +
-          '    or set MONGODB_URI to a MongoDB Atlas connection string in backend/.env.\n',
-      )
-    }
-    throw err
-  }
-}
-
-function shutdown(signal) {
-  return async () => {
-    // eslint-disable-next-line no-console
-    console.info(`${signal}: closing HTTP server`)
-    server.close(async () => {
-      await mongoose.connection.close()
-      // eslint-disable-next-line no-console
-      console.info('MongoDB connection closed')
-      process.exit(0)
-    })
-    setTimeout(() => process.exit(1), 15_000).unref()
-  }
-}
-
-// Export app for Vercel
+/**
+ * Export for Vercel
+ */
 export default app
 
-// Only run server in non-Vercel environments
+/**
+ * Local server (ONLY for non-Vercel environments)
+ */
 if (!isVercel) {
+  const server = http.createServer(app)
+
+  function shutdown(signal) {
+    return async () => {
+      console.info(`${signal}: closing HTTP server`)
+      server.close(async () => {
+        await mongoose.connection.close()
+        console.info('MongoDB connection closed')
+        process.exit(0)
+      })
+      setTimeout(() => process.exit(1), 15000).unref()
+    }
+  }
+
   async function main() {
     await connectDb()
-    // eslint-disable-next-line no-console
-    console.info('MongoDB connected')
     await ensureAdminUser()
+
     server.listen(env.PORT, () => {
-      // eslint-disable-next-line no-console
       console.info(`API listening on port ${env.PORT}`)
     })
   }
