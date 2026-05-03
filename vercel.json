@@ -1,5 +1,9 @@
 {
-  "buildCommand": "cd frontend && npm run build",
+  "buildCommand": "cd frontend && npm run build && cd ../backend && npm install",
   "outputDirectory": "frontend/dist",
-  "installCommand": "npm install --prefix backend && npm install --prefix frontend"
+  "installCommand": "npm install --prefix frontend && npm install --prefix backend",
+  "env": {
+    "NODE_ENV": "production",
+    "TRUST_PROXY": "true"
+  }
 }

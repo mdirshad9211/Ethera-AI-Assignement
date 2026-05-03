@@ -15,6 +15,8 @@ import { notFoundHandler, errorHandler } from './middleware/errorMiddleware.js'
 import { AppError } from './utils/AppError.js'
 import { ensureAdminUser } from './bootstrap/ensureAdminUser.js'
 
+const isVercel = !!process.env.VERCEL
+
 if (env.TRUST_PROXY) {
   // eslint-disable-next-line no-console
   console.info('Trust proxy: enabled')
@@ -44,7 +46,6 @@ app.use(
           }
         : true,
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   }),
 )
 
@@ -72,6 +73,7 @@ const server = http.createServer(app)
 
 async function connectDb() {
   try {
+    if (mongoose.connection.readyState === 1) return
     await mongoose.connect(env.MONGODB_URI, {
       maxPoolSize: 20,
       serverSelectionTimeoutMS: 10_000,
@@ -105,21 +107,27 @@ function shutdown(signal) {
   }
 }
 
-async function main() {
-  await connectDb()
-  // eslint-disable-next-line no-console
-  console.info('MongoDB connected')
-  await ensureAdminUser()
-  server.listen(env.PORT, () => {
+// Export app for Vercel
+export default app
+
+// Only run server in non-Vercel environments
+if (!isVercel) {
+  async function main() {
+    await connectDb()
     // eslint-disable-next-line no-console
-    console.info(`API listening on port ${env.PORT}`)
+    console.info('MongoDB connected')
+    await ensureAdminUser()
+    server.listen(env.PORT, () => {
+      // eslint-disable-next-line no-console
+      console.info(`API listening on port ${env.PORT}`)
+    })
+  }
+
+  process.on('SIGINT', shutdown('SIGINT'))
+  process.on('SIGTERM', shutdown('SIGTERM'))
+
+  main().catch((err) => {
+    console.error(err)
+    process.exit(1)
   })
 }
-
-process.on('SIGINT', shutdown('SIGINT'))
-process.on('SIGTERM', shutdown('SIGTERM'))
-
-main().catch((err) => {
-  console.error(err)
-  process.exit(1)
-})
